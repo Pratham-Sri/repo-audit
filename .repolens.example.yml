@@ -1,0 +1,14 @@
+# Copy to .repolens.yml at the root of a repository being scanned.
+ignore_paths:
+  - generated/**
+  - vendor/**
+
+disabled_rules:
+  - todo
+
+severity_overrides:
+  loop-query: High
+
+# Rules default to enabled. Set a rule to false to disable it.
+rules:
+  debug: false

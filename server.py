@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-import threading
 import urllib.parse
 import zipfile
 from collections import Counter
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,6 +24,42 @@ MAX_UNPACKED = 120 * 1024 * 1024
 MAX_FILES = 5000
 EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".go", ".rb", ".php", ".cs", ".sql", ".html", ".yml", ".yaml", ".json", ".toml", ".env", ".sh"}
 SKIP = {".git", "node_modules", "vendor", "dist", "build", ".next", "coverage", "__pycache__", ".venv"}
+
+
+@dataclass(frozen=True)
+class Finding(Mapping[str, object]):
+    """Normalized RepoLens finding; Mapping keeps existing scanner adapters compatible."""
+
+    rule_id: str
+    severity: str
+    confidence: str
+    file: str
+    line: int
+    tool: str
+    title: str
+    evidence: str
+    category: str
+    fix_hint: str
+    exploitability: str = "medium"
+    fingerprint: str | None = None
+    sources: tuple[str, ...] = field(default_factory=tuple)
+
+    _ALIASES = {"id": "rule_id", "engine": "tool", "fix": "fix_hint"}
+
+    def __getitem__(self, key: str) -> object:
+        return getattr(self, self._ALIASES.get(key, key))
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("id", "severity", "title", "file", "line", "evidence", "category", "fix", "engine", "confidence", "exploitability", "fingerprint", "sources"))
+
+    def __len__(self) -> int:
+        return 13
+
+    def to_dict(self) -> dict:
+        return {"id": self.rule_id, "rule_id": self.rule_id, "severity": self.severity, "title": self.title, "file": self.file, "line": self.line,
+                "evidence": self.evidence, "category": self.category, "fix": self.fix_hint, "fix_hint": self.fix_hint, "engine": self.tool, "tool": self.tool,
+                "confidence": self.confidence, "exploitability": self.exploitability,
+                "fingerprint": self.fingerprint, "sources": list(self.sources or (self.tool,))}
 
 RULES = [
     ("secret", "Critical", "Exposed credential", re.compile(r"(?i)(?:api[_-]?key|secret|password|token)\s*[:=]\s*['\"][A-Za-z0-9_\-/+=]{12,}['\"]"), "Move this value into a server-side environment variable, rotate the exposed credential, and add the secret file to .gitignore.", "Security"),
@@ -32,21 +72,103 @@ RULES = [
     ("loop-query", "Medium", "Potential query inside a loop", re.compile(r"(?is)(?:for|while)\s*\([^)]*\)\s*\{[^{}]{0,600}(?:\.find(?:One|Many)?\(|\.query\(|\.execute\(|SELECT\s+)[^{}]*\}|(?:for|while)\s+[^:\n]+:\s*\n(?:[^\n]*\n){0,8}\s*[^\n]*(?:\.filter\(|\.get\(|\.execute\(|SELECT\s+)"), "Fetch related records in one query, use eager loading, or batch the operation to avoid N+1 database calls.", "Scaling"),
 ]
 
+def load_config(root: Path) -> dict[str, Any]:
+    """Read the documented, deliberately small YAML subset without a runtime dependency."""
+    config: dict[str, Any] = {"ignore_paths": [], "disabled_rules": [], "severity_overrides": {}, "rules": {}}
+    file = root / ".repolens.yml"
+    if not file.is_file(): return config
+    section = ""
+    try: lines = file.read_text("utf-8", errors="replace").splitlines()
+    except OSError: return config
+    for raw in lines:
+        line = raw.split(" #", 1)[0].rstrip()
+        if not line.strip() or line.lstrip().startswith("#"): continue
+        if not line.startswith((" ", "\t")) and line.endswith(":"):
+            section = line[:-1].strip()
+            continue
+        value = line.strip()
+        if section in {"ignore_paths", "disabled_rules"} and value.startswith("-"):
+            config[section].append(value[1:].strip().strip("'\""))
+        elif section in {"severity_overrides", "rules"} and ":" in value:
+            key, val = value.split(":", 1)
+            val = val.strip().strip("'\"")
+            if section == "severity_overrides": config[section][key.strip()] = val.capitalize()
+            else: config[section][key.strip()] = val.lower() not in {"false", "off", "no", "0"}
+    return config
+
+def ignored_path(file: str, config: dict[str, Any]) -> bool:
+    return any(fnmatch.fnmatchcase(file, pattern) or fnmatch.fnmatchcase("/" + file, pattern) for pattern in config.get("ignore_paths", []))
+
+def rule_matches(rule_id: str, configured: str) -> bool:
+    return rule_id == configured or rule_id.split(":", 1)[-1] == configured
+
+def apply_suppressions(root: Path, findings: list[Finding], config: dict[str, Any]) -> list[Finding]:
+    kept = []
+    disabled = config.get("disabled_rules", []) + [rule for rule, enabled in config.get("rules", {}).items() if not enabled]
+    cache: dict[str, list[str]] = {}
+    for item in findings:
+        if ignored_path(item.file, config) or any(rule_matches(item.rule_id, r) for r in disabled): continue
+        overrides = config.get("severity_overrides", {})
+        severity = next((v for r, v in overrides.items() if rule_matches(item.rule_id, r)), item.severity)
+        if severity not in {"Critical", "High", "Medium", "Low"}: severity = item.severity
+        try:
+            lines = cache.setdefault(item.file, (root / item.file).read_text("utf-8", errors="replace").splitlines())
+            comment_lines = lines[max(0, item.line - 2):min(len(lines), item.line)]
+        except (OSError, ValueError): comment_lines = []
+        markers = re.findall(r"repolens-ignore\s*:\s*([\w:.,* -]+)", "\n".join(comment_lines), re.I)
+        suppressed = any(any(rule_matches(item.rule_id, token.strip()) or token.strip() == "*" for token in marker.split(",")) for marker in markers)
+        if suppressed: continue
+        kept.append(Finding(item.rule_id, severity, item.confidence, item.file, item.line, item.tool, item.title, item.evidence, item.category, item.fix_hint, item.exploitability, item.fingerprint, item.sources))
+    return kept
+
+SEVERITY_WEIGHTS = {"Critical": 25, "High": 12, "Medium": 5, "Low": 2}
+CONFIDENCE_MULTIPLIERS = {"high": 1.0, "medium": 0.75, "low": 0.5}
+EXPLOITABILITY_MULTIPLIERS = {"high": 1.2, "medium": 1.0, "low": 0.7}
+
+def finding_penalty(item: Mapping[str, Any]) -> float:
+    return (SEVERITY_WEIGHTS.get(str(item["severity"]), 2)
+            * CONFIDENCE_MULTIPLIERS.get(str(item.get("confidence", "medium")).lower(), 0.75)
+            * EXPLOITABILITY_MULTIPLIERS.get(str(item.get("exploitability", "medium")).lower(), 1.0))
+
+def calculate_scores(findings: list[Finding]) -> tuple[int, dict[str, int]]:
+    def score(items): return max(0, min(100, round(100 - sum(finding_penalty(f) for f in items))))
+    categories = {name: score([f for f in findings if f.category.lower() in aliases]) for name, aliases in {
+        "security": {"security"}, "maintainability": {"maintainability"}, "dependencies": {"dependencies"},
+        "docs_tests": {"docs", "tests", "completeness"}, "scaling": {"scaling"},
+    }.items()}
+    return score(findings), categories
+
+def to_sarif(report: dict) -> dict:
+    rules: dict[str, dict[str, Any]] = {}
+    results = []
+    levels = {"Critical": "error", "High": "error", "Medium": "warning", "Low": "note"}
+    for finding in report["findings"]:
+        rule_id = str(finding["id"])
+        rules.setdefault(rule_id, {"id": rule_id, "name": str(finding["title"]), "shortDescription": {"text": str(finding["title"])}})
+        digest = hashlib.sha256(f"{finding.get('engine')}\0{rule_id}\0{finding['file']}\0{finding['line']}".encode()).hexdigest()
+        results.append({"ruleId": rule_id, "level": levels.get(finding["severity"], "warning"),
+            "message": {"text": f"{finding['title']}: {finding['evidence']}"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": finding["file"]}, "region": {"startLine": max(1, int(finding["line"]))}}}],
+            "partialFingerprints": {"primaryLocationLineHash": digest},
+            "properties": {"severity": finding["severity"], "category": finding["category"], "confidence": finding.get("confidence", "medium"), "exploitability": finding.get("exploitability", "medium"), "tool": finding.get("engine", "RepoLens rules"), "sources": finding.get("sources", []), "fixHint": finding["fix"]}})
+    return {"$schema": "https://json.schemastore.org/sarif-2.1.0.json", "version": "2.1.0", "runs": [{"tool": {"driver": {"name": "RepoLens", "informationUri": "https://github.com/Pratham-Sri/repo-audit", "rules": list(rules.values())}}, "results": results}]}
+
 def analyze(path: Path, label: str, scan_workspace: Path) -> dict:
-    findings = []
+    config = load_config(path)
+    findings: list[Finding] = []
     files = []
-    languages = Counter()
+    languages: Counter[str] = Counter()
     source_lines = 0
-    duplicate_lines = Counter()
+    duplicate_lines: Counter[tuple[str, str]] = Counter()
     function_count = 0
     complexity = 0
-    manifest_deps = set()
     package_names = set()
     for current, dirs, names in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith(".")]
+        dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith(".") and not ignored_path(Path(d).as_posix(), config)]
         for name in names:
             p = Path(current) / name
             rel = p.relative_to(path).as_posix()
+            if ignored_path(rel, config): continue
             ext = p.suffix.lower()
             if name.lower() in {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "pom.xml", "composer.json"}:
                 try:
@@ -79,7 +201,7 @@ def analyze(path: Path, label: str, scan_workspace: Path) -> dict:
     if len(files) > MAX_FILES:
         files = files[:MAX_FILES]
     # Flag repeated lines across distinct files as a conservative duplication signal.
-    seen = {}
+    seen: dict[str, str] = {}
     for (rel, line), _ in duplicate_lines.items():
         if line in seen and seen[line] != rel:
             findings.append(finding("duplicate", "Low", "Repeated code line", rel, 1, "A substantial line also appears in " + seen[line] + ". Review for copy-pasted logic.", "Maintainability", "Extract shared behavior into a helper or module if these copies need to stay in sync."))
@@ -114,15 +236,18 @@ def analyze(path: Path, label: str, scan_workspace: Path) -> dict:
     # Gitleaks is authoritative for secret detection; hide duplicate heuristic alerts at the same location.
     gitleaks_locations = {(f["file"], f["line"]) for f in scanner_results[0][2]}
     findings = [f for f in findings if not (f["id"] in {"secret", "private-key"} and (f["file"], f["line"]) in gitleaks_locations)]
+    findings = apply_suppressions(path, findings, config)
     findings = dedupe(findings)
     rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-    findings.sort(key=lambda f: (rank.get(f["severity"], 4), f["file"], f["line"]))
-    score = max(0, min(100, 100 - sum({"Critical": 25, "High": 12, "Medium": 5, "Low": 2}[f["severity"]] for f in findings)))
+    findings.sort(key=lambda f: (rank.get(str(f["severity"]), 4), str(f["file"]), int(str(f["line"]))))
+    score, category_scores = calculate_scores(findings)
     engines = [{"name": "RepoLens rules", "status": "complete", "detail": "Built-in deterministic checks"}]
     engines.extend({"name": name, "status": result[0], "detail": result[1]} for name, result in zip(("Gitleaks", "OSV-Scanner", "Semgrep", "Bandit", "ESLint", "Radon", "CodeQL"), scanner_results))
-    return {"repository": label, "score": score, "grade": "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 65 else "D" if score >= 50 else "F", "summary": {"files": len(files), "lines": source_lines, "functions": function_count, "complexity": complexity, "findings": len(findings), "critical": sum(f["severity"] == "Critical" for f in findings), "high": sum(f["severity"] == "High" for f in findings), "medium": sum(f["severity"] == "Medium" for f in findings), "low": sum(f["severity"] == "Low" for f in findings)}, "languages": [{"name": k, "files": v} for k, v in languages.most_common(6)], "findings": findings, "engines": engines}
+    report = {"schemaVersion": "1.0.0", "repository": label, "score": score, "categoryScores": category_scores, "grade": "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 65 else "D" if score >= 50 else "F", "summary": {"files": len(files), "lines": source_lines, "functions": function_count, "complexity": complexity, "findings": len(findings), "critical": sum(f["severity"] == "Critical" for f in findings), "high": sum(f["severity"] == "High" for f in findings), "medium": sum(f["severity"] == "Medium" for f in findings), "low": sum(f["severity"] == "Low" for f in findings)}, "languages": [{"name": k, "files": v} for k, v in languages.most_common(6)], "findings": [f.to_dict() for f in findings], "engines": engines}
+    report["sarif"] = to_sarif(report)
+    return report
 
-def run_gitleaks(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
+def run_gitleaks(path: Path, scan_workspace: Path) -> tuple[str, str, list[Finding]]:
     executable = shutil.which("gitleaks")
     if not executable:
         return "not-installed", "Install Gitleaks to scan for secrets", []
@@ -149,7 +274,7 @@ def run_gitleaks(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]
             try: line = max(1, int(item.get("StartLine") or 1))
             except (TypeError, ValueError): line = 1
             critical = any(token in rule.lower() for token in ("private-key", "private_key", "aws-root"))
-            results.append({"id": f"gitleaks:{rule}", "severity": "Critical" if critical else "High", "title": "Exposed credential detected", "file": relative, "line": line, "evidence": f"Gitleaks rule '{rule}' matched. Secret value redacted.", "category": "Security", "fix": "Revoke and rotate this credential, remove it from the repository and its history where appropriate, then load the replacement from a secret manager.", "engine": "Gitleaks", "confidence": "high", "fingerprint": item.get("Fingerprint")})
+            results.append(Finding(f"gitleaks:{rule}", "Critical" if critical else "High", "high", relative, line, "Gitleaks", "Exposed credential detected", f"Gitleaks rule '{rule}' matched. Secret value redacted.", "Security", "Revoke and rotate this credential, remove it from the repository and its history where appropriate, then load the replacement from a secret manager.", "high", item.get("Fingerprint"), ("Gitleaks",)))
         return "complete", f"Scanned {'shallow Git history and working tree' if (path / '.git').exists() else 'repository files'} · {len(results)} secret finding(s)", results
     except subprocess.TimeoutExpired:
         return "failed", "Gitleaks exceeded its 135 second time limit", []
@@ -167,10 +292,10 @@ def normalize_path(root: Path, raw_path: str) -> str:
     except (OSError, ValueError):
         return Path(raw_path).name or "unknown"
 
-def external_finding(engine: str, rule: str, severity: str, title: str, file: str, line: int, evidence: str, category: str, fix: str, confidence="high") -> dict:
-    return {"id": f"{engine.lower()}:{rule}", "severity": severity, "title": title, "file": file, "line": max(1, line), "evidence": evidence[:500], "category": category, "fix": fix, "engine": engine, "confidence": confidence}
+def external_finding(engine: str, rule: str, severity: str, title: str, file: str, line: int, evidence: str, category: str, fix: str, confidence="high") -> Finding:
+    return Finding(f"{engine.lower()}:{rule}", severity, confidence, file, max(1, line), engine, title, evidence[:500], category, fix, "high" if severity in {"Critical", "High"} else "medium", None, (engine,))
 
-def run_osv(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
+def run_osv(path: Path, scan_workspace: Path) -> tuple[str, str, list[Finding]]:
     executable = shutil.which("osv-scanner")
     if not executable: return "not-installed", "Install OSV-Scanner to check lockfiles against OSV advisories", []
     try:
@@ -193,7 +318,7 @@ def run_osv(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
     except subprocess.TimeoutExpired: return "failed", "OSV-Scanner exceeded its 180 second time limit", []
     except (OSError, json.JSONDecodeError, AttributeError, TypeError): return "failed", "Could not parse OSV-Scanner output", []
 
-def run_semgrep(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
+def run_semgrep(path: Path, scan_workspace: Path) -> tuple[str, str, list[Finding]]:
     executable = shutil.which("semgrep")
     if not executable: return "not-installed", "Install Semgrep CLI to run the security rule pack", []
     try:
@@ -215,7 +340,7 @@ def run_semgrep(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]
     except subprocess.TimeoutExpired: return "failed", "Semgrep exceeded its 240 second time limit", []
     except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError): return "failed", "Could not parse Semgrep output", []
 
-def run_bandit(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
+def run_bandit(path: Path, scan_workspace: Path) -> tuple[str, str, list[Finding]]:
     executable = shutil.which("bandit")
     if not executable: return "not-installed", "Install Bandit to scan Python code", []
     try:
@@ -230,7 +355,7 @@ def run_bandit(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
     except subprocess.TimeoutExpired: return "failed", "Bandit exceeded its 120 second time limit", []
     except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError): return "failed", "Could not parse Bandit output", []
 
-def run_eslint(path: Path, scan_workspace: Path, has_typescript=False) -> tuple[str, str, list[dict]]:
+def run_eslint(path: Path, scan_workspace: Path, has_typescript=False) -> tuple[str, str, list[Finding]]:
     executable = shutil.which("eslint")
     if not executable: return "not-installed", "Install ESLint CLI to check JavaScript syntax and common defects", []
     try:
@@ -249,7 +374,7 @@ def run_eslint(path: Path, scan_workspace: Path, has_typescript=False) -> tuple[
     except subprocess.TimeoutExpired: return "failed", "ESLint exceeded its 120 second time limit", []
     except (OSError, json.JSONDecodeError, TypeError, ValueError): return "failed", "Could not parse ESLint output (a recent ESLint CLI is required)", []
 
-def run_radon(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
+def run_radon(path: Path, scan_workspace: Path) -> tuple[str, str, list[Finding]]:
     executable = shutil.which("radon")
     if not executable: return "not-installed", "Install Radon to measure Python function complexity", []
     try:
@@ -266,7 +391,7 @@ def run_radon(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
     except subprocess.TimeoutExpired: return "failed", "Radon exceeded its 90 second time limit", []
     except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError): return "failed", "Could not parse Radon output", []
 
-def run_codeql(path: Path, scan_workspace: Path, language: str | None) -> tuple[str, str, list[dict]]:
+def run_codeql(path: Path, scan_workspace: Path, language: str | None) -> tuple[str, str, list[Finding]]:
     if not language: return "not-applicable", "No supported CodeQL language detected", []
     executable = shutil.which("codeql")
     if not executable: return "not-installed", "Install CodeQL CLI for deeper data-flow analysis", []
@@ -304,13 +429,24 @@ def run_codeql(path: Path, scan_workspace: Path, language: str | None) -> tuple[
 
 def finding(rule, severity, title, file, line, evidence, category, fix=None):
     defaults = {r[0]: r[4] for r in RULES}
-    return {"id": rule, "severity": severity, "title": title, "file": file, "line": line, "evidence": evidence, "category": category, "fix": fix or defaults.get(rule, "Review this code and consider extracting repeated behavior into a shared helper."), "engine": "RepoLens rules", "confidence": "medium"}
+    return Finding(rule, severity, "medium", file, line, "RepoLens rules", title, evidence, category, fix or defaults.get(rule, "Review this code and consider extracting repeated behavior into a shared helper."), "medium", None, ("RepoLens rules",))
 
 def dedupe(items):
-    got = set(); out = []
+    got = {}; out = []
     for f in items:
-        key = (f["id"], f["file"], f["line"])
-        if key not in got: got.add(key); out.append(f)
+        key = (f["file"], f["line"], f["title"], f["category"])
+        if key not in got:
+            got[key] = f; out.append(f); continue
+        prior = got[key]
+        sources = tuple(dict.fromkeys((*prior.sources, *f.sources, prior.tool, f.tool)))
+        severity_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+        primary = prior if severity_rank.get(prior.severity, 4) <= severity_rank.get(f.severity, 4) else f
+        merged = Finding(primary.rule_id, primary.severity, "high" if "high" in {prior.confidence, f.confidence} else primary.confidence,
+                         primary.file, primary.line, primary.tool, primary.title, primary.evidence, primary.category,
+                         primary.fix_hint, "high" if "high" in {prior.exploitability, f.exploitability} else primary.exploitability,
+                         prior.fingerprint or f.fingerprint, sources)
+        got[key] = merged
+        out[out.index(prior)] = merged
     return out
 
 class Handler(BaseHTTPRequestHandler):

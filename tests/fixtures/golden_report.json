@@ -1,0 +1,89 @@
+{
+  "schemaVersion": "1.0.0",
+  "repository": "golden",
+  "score": 100,
+  "categoryScores": {
+    "security": 100,
+    "maintainability": 100,
+    "dependencies": 100,
+    "docs_tests": 100,
+    "scaling": 100
+  },
+  "grade": "A",
+  "summary": {
+    "files": 1,
+    "lines": 6,
+    "functions": 2,
+    "complexity": 2,
+    "findings": 0,
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "languages": [
+    {
+      "name": ".py",
+      "files": 1
+    }
+  ],
+  "findings": [],
+  "engines": [
+    {
+      "name": "RepoLens rules",
+      "status": "complete",
+      "detail": "Built-in deterministic checks"
+    },
+    {
+      "name": "Gitleaks",
+      "status": "not-installed",
+      "detail": "mock scanner"
+    },
+    {
+      "name": "OSV-Scanner",
+      "status": "not-installed",
+      "detail": "mock scanner"
+    },
+    {
+      "name": "Semgrep",
+      "status": "not-installed",
+      "detail": "mock scanner"
+    },
+    {
+      "name": "Bandit",
+      "status": "not-installed",
+      "detail": "mock scanner"
+    },
+    {
+      "name": "ESLint",
+      "status": "not-applicable",
+      "detail": "No JavaScript files detected"
+    },
+    {
+      "name": "Radon",
+      "status": "not-installed",
+      "detail": "mock scanner"
+    },
+    {
+      "name": "CodeQL",
+      "status": "not-installed",
+      "detail": "mock scanner"
+    }
+  ],
+  "sarif": {
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    "version": "2.1.0",
+    "runs": [
+      {
+        "tool": {
+          "driver": {
+            "name": "RepoLens",
+            "informationUri": "https://github.com/Pratham-Sri/repo-audit",
+            "rules": []
+          }
+        },
+        "results": []
+      }
+    ]
+  }
+}

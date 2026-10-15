@@ -1,0 +1,4 @@
+[tool.ruff.lint]
+# The MVP keeps compact legacy server handlers; Ruff still checks imports, names,
+# undefined variables, and other default pyflakes rules.
+ignore = ["E701", "E702"]

@@ -37,6 +37,37 @@ Install any tools you want from their official sources, and make sure each CLI i
 
 These built-in checks are heuristics. They can miss issues and can flag code that is safe in context; review the file and line before acting. RepoLens avoids quoting source lines in its findings to reduce the chance of exposing a secret through unrelated evidence. Dependency-manifest checks are intentionally a hint and do not prove that a package is nonexistent or unsafe.
 
+## Finding format and exports
+
+Each finding is normalized through the `Finding` schema: rule ID, severity, confidence, file, line, tool, title, evidence, category, fix hint, and exploitability. JSON reports are versioned with `schemaVersion` and retain RepoLens-specific context, category scores, scanner status, and a SARIF representation. Use **Export SARIF** after a scan to download SARIF 2.1.0 for GitHub code scanning or compatible editors.
+
+## Suppressions and configuration
+
+Place `.repolens.yml` at the root of a scanned repository. RepoLens supports a conservative YAML subset and does not execute or load YAML tags. Copy [.repolens.example.yml](.repolens.example.yml) to see supported keys:
+
+```yaml
+ignore_paths:
+  - generated/**
+disabled_rules:
+  - todo
+severity_overrides:
+  loop-query: High
+rules:
+  debug: false
+```
+
+Inline comments suppress matching rule IDs on their own line or the immediately following source line: `# repolens-ignore: rule-id` (also accepts `//` comment syntax). Multiple IDs can be comma-separated; `*` suppresses all RepoLens findings at the annotated line. External IDs may be specified in full (for example `bandit:B602`) or by their rule suffix. Suppressed findings do not affect scores or SARIF.
+
+## Scoring
+
+The score starts at 100 and subtracts the sum of each finding's severity weight multiplied by confidence and exploitability. Severity weights are Critical 25, High 12, Medium 5, and Low 2. Confidence multipliers are high 1.0, medium 0.75, and low 0.5; exploitability multipliers are high 1.2, medium 1.0, and low 0.7. Each penalty is rounded only when the final score is calculated; the final score is clamped to 0–100. Built-in heuristics default to medium confidence and medium exploitability. External scanner findings default to high confidence, with high exploitability for Critical/High and medium otherwise. These defaults are triage hints, not calibrated probabilities.
+
+Category scores use the same formula on findings in that category and are reported for security, maintainability, dependencies, docs/tests (currently includes completeness checks), and scaling. A category with no findings scores 100. The overall score combines all findings directly, so it is not the average of category scores. The score is a navigation aid, not a certification or a comparison across unlike repositories.
+
+## Development and CI
+
+Run tests with `python -m pytest -q`. CI runs Ruff, Mypy, and the tests for Python 3.10 through 3.13. Scanner CLIs are mocked in report tests, so CI does not install or invoke third-party scanners.
+
 ## Analysis engines
 
 The report marks built-in rules as active and each optional scanner as active, missing, not applicable, or failed based on the local CLI. The engine panel calls this out rather than presenting missing tools as passing. The LLM review layer is not configured; no code is sent to an AI service.
