@@ -457,9 +457,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self): self.send(204, b"")
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
-        target = ROOT / ("index.html" if path == "/" else path.lstrip("/"))
+        web_root = ROOT / "dist" if (ROOT / "dist" / "index.html").is_file() else ROOT
+        target = web_root / ("index.html" if path == "/" else path.lstrip("/"))
         try:
-            if ROOT not in target.resolve().parents and target.resolve() != ROOT.resolve(): raise ValueError()
+            if web_root.resolve() not in target.resolve().parents and target.resolve() != web_root.resolve(): raise ValueError()
             mime = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}.get(target.suffix, "text/plain")
             self.send(200, target.read_bytes(), mime + "; charset=utf-8")
         except Exception: self.send(404, "Not found", "text/plain")

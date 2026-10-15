@@ -4,7 +4,7 @@ RepoLens is a small, local-first repository health scanner. It accepts a public 
 
 ## Run it
 
-Requires Python 3.10+ and Git (Git is only needed for GitHub URL scans). No Python packages are required.
+Requires Python 3.10+ and Git (Git is only needed for GitHub URL scans). The bundled React interface is served from the committed build; Node.js is only needed when rebuilding the UI.
 
 ```powershell
 cd repo-audit
@@ -12,6 +12,8 @@ python server.py
 ```
 
 Open <http://localhost:4173>. ZIP uploads are limited to 25 MB. The server binds to localhost and deletes each temporary checkout after generating the report.
+
+To work on the React interface, install Node.js 20+, then run `npm ci` and `npm run build`. The Python server serves the generated `dist/` app when it exists. `npm run dev` starts Vite for frontend work; run the Python API server separately while using the dev server.
 
 ### Optional scanner CLIs
 
