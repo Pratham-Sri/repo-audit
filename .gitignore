@@ -10,3 +10,5 @@ codeql.sarif
 codeql-db/
 node_modules/
 .vite/
+
+.tools/

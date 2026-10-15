@@ -17,7 +17,7 @@ To work on the React interface, install Node.js 20+, then run `npm ci` and `npm 
 
 ### Optional scanner CLIs
 
-Install any tools you want from their official sources, and make sure each CLI is on `PATH` before starting RepoLens. Missing CLIs are skipped and shown as not installed; RepoLens never downloads tools or installs target-project dependencies for you. Source analysis runs on the local machine, but OSV-Scanner sends package coordinates to the OSV vulnerability service and Semgrep may download its selected rule pack.
+Install any tools you want from their official sources. RepoLens detects local tools in `.tools` automatically, or uses commands on `PATH`. Missing CLIs are skipped and shown as not installed; RepoLens never installs target-project dependencies. Source analysis runs on the local machine, but OSV-Scanner sends package coordinates to the OSV vulnerability service and Semgrep may download its selected rule pack. CodeQL CLI is free for public repositories; private-repository use requires the applicable GitHub Code Security license. Only run it on repositories eligible under GitHub's CodeQL terms.
 
 | Tool | CLI name | Scope |
 | --- | --- | --- |

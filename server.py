@@ -19,11 +19,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
+# Keep optional scanner installs local to this checkout. This lets RepoLens find
+# tools installed under .tools without adding them to the machine-wide PATH.
+LOCAL_TOOL_PATHS = (
+    ROOT / ".tools" / "bin",
+    ROOT / ".tools" / "python" / "Scripts",
+    ROOT / ".tools" / "npm" / "node_modules" / ".bin",
+    ROOT / ".tools" / "codeql",
+)
+os.environ["PATH"] = os.pathsep.join(
+    [str(path) for path in LOCAL_TOOL_PATHS if path.is_dir()] + [os.environ.get("PATH", "")]
+)
 MAX_UPLOAD = 25 * 1024 * 1024
 MAX_UNPACKED = 120 * 1024 * 1024
 MAX_FILES = 5000
 EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".go", ".rb", ".php", ".cs", ".sql", ".html", ".yml", ".yaml", ".json", ".toml", ".env", ".sh"}
-SKIP = {".git", "node_modules", "vendor", "dist", "build", ".next", "coverage", "__pycache__", ".venv"}
+SKIP = {".git", ".tools", "node_modules", "vendor", "dist", "build", ".next", "coverage", "__pycache__", ".venv"}
 
 
 @dataclass(frozen=True)
