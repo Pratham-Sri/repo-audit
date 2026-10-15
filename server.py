@@ -107,7 +107,7 @@ def analyze(path: Path, label: str, scan_workspace: Path) -> dict:
         run_bandit(path, scan_workspace) if has_python else ("not-applicable", "No Python files detected", []),
         run_eslint(path, scan_workspace, has_typescript) if has_javascript else ("not-supported" if has_typescript else "not-applicable", "TypeScript files detected; this MVP does not load third-party ESLint parsers" if has_typescript else "No JavaScript files detected", []),
         run_radon(path, scan_workspace) if has_python else ("not-applicable", "No Python files detected", []),
-        run_codeql(path, scan_workspace, "python" if has_python else "javascript-typescript" if has_javascript else None),
+        run_codeql(path, scan_workspace, "python" if has_python else "javascript-typescript" if has_javascript or has_typescript else None),
     ])
     for _, _, scan_findings in scanner_results:
         findings.extend(scan_findings)
