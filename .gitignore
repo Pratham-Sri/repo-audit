@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+gitleaks-report.json
+codeql.sarif
+codeql-db/
