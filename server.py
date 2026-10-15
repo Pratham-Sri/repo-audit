@@ -71,7 +71,7 @@ def analyze(path: Path, label: str, scan_workspace: Path) -> dict:
             for n, line in enumerate(lines, 1):
                 for rid, severity, title, regex, fix, category in RULES:
                     if regex.search(line):
-                        evidence = "Credential-like value detected; the value is redacted." if rid == "secret" else "Private key marker detected; key contents are redacted." if rid == "private-key" else line.strip()[:180]
+                        evidence = "Credential-like value detected; the value is redacted." if rid == "secret" else "Private key marker detected; key contents are redacted." if rid == "private-key" else "Rule matched at this location; source text is hidden to avoid exposing sensitive values."
                         findings.append(finding(rid, severity, title, rel, n, evidence, category, fix))
                 stripped = line.strip()
                 if len(stripped) > 35 and not stripped.startswith(("#", "//", "*")):
@@ -176,6 +176,8 @@ def run_osv(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
     try:
         proc = subprocess.run([executable, "scan", "source", "--recursive", "--format", "json", str(path)], cwd=scan_workspace, capture_output=True, text=True, timeout=180, check=False)
         data = json.loads(proc.stdout)
+        if proc.returncode not in (0, 1) or data.get("errors"):
+            return "failed", "OSV-Scanner reported an error; dependency results may be incomplete", []
         results = []
         for source in data.get("results", []):
             manifest = normalize_path(path, str(source.get("source", {}).get("path", "unknown")))
@@ -187,8 +189,6 @@ def run_osv(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]:
                     refs = ", ".join(str(x) for x in aliases[:2])
                     summary = str(vuln.get("summary") or vuln.get("details") or "Known vulnerability reported by OSV")
                     results.append(external_finding("OSV-Scanner", vuln_id, "High", f"Vulnerable dependency: {name}", manifest, 1, f"{vuln_id}{' · '+refs if refs else ''} · {name}@{version} · {summary}", "Dependencies", "Upgrade this dependency to a patched version listed in the OSV advisory, then regenerate and commit the lockfile."))
-        if proc.returncode not in (0, 1) and not data:
-            return "failed", "OSV-Scanner exited with an error", []
         return "complete", f"Checked dependency manifests · {len(results)} vulnerability finding(s)", results
     except subprocess.TimeoutExpired: return "failed", "OSV-Scanner exceeded its 180 second time limit", []
     except (OSError, json.JSONDecodeError, AttributeError, TypeError): return "failed", "Could not parse OSV-Scanner output", []
@@ -199,6 +199,8 @@ def run_semgrep(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]
     try:
         proc = subprocess.run([executable, "scan", "--config", "p/default", "--json", "--quiet", "--metrics=off", str(path)], cwd=scan_workspace, capture_output=True, text=True, timeout=240, check=False)
         data = json.loads(proc.stdout)
+        if not isinstance(data, dict) or data.get("errors") or proc.returncode not in (0, 1):
+            return "failed", "Semgrep reported an error; security results may be incomplete", []
         results = []
         for item in data.get("results", []):
             extra = item.get("extra", {}); metadata = extra.get("metadata", {})
@@ -209,7 +211,6 @@ def run_semgrep(path: Path, scan_workspace: Path) -> tuple[str, str, list[dict]]
             msg = str(extra.get("message") or item.get("message") or "Semgrep reported a match")
             fix = str(extra.get("fix") or metadata.get("remediation") or "Review the rule guidance and validate whether this pattern is exploitable in context.")
             results.append(external_finding("Semgrep", rule, severity, str(metadata.get("shortDescription") or msg.split("\n")[0])[:160], normalize_path(path, str(item.get("path", "unknown"))), line, msg, "Security", fix))
-        if proc.returncode not in (0, 1) and not isinstance(data, dict): return "failed", "Semgrep exited with an error", []
         return "complete", f"Ran p/default rules · {len(results)} finding(s)", results
     except subprocess.TimeoutExpired: return "failed", "Semgrep exceeded its 240 second time limit", []
     except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError): return "failed", "Could not parse Semgrep output", []

@@ -35,7 +35,7 @@ Install any tools you want from their official sources, and make sure each CLI i
 - Conservative hints for repeated lines and imports missing from recognized dependency manifests.
 - A score that prioritizes the number and severity of findings. It is a navigation aid, not a formal security certification.
 
-These built-in checks are heuristics. They can miss issues and can flag code that is safe in context; review evidence before acting. Dependency-manifest checks are intentionally a hint and do not prove that a package is nonexistent or unsafe.
+These built-in checks are heuristics. They can miss issues and can flag code that is safe in context; review the file and line before acting. RepoLens avoids quoting source lines in its findings to reduce the chance of exposing a secret through unrelated evidence. Dependency-manifest checks are intentionally a hint and do not prove that a package is nonexistent or unsafe.
 
 ## Analysis engines
 
